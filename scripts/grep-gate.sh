@@ -14,6 +14,7 @@ HITS=$(grep -rn --include='*.tsx' --include='*.ts' --include='*.css' \
   | grep -vi '#fff\b' \
   | grep -vi 'var(--' \
   | grep -vi 'Auto-generated' \
+  | grep -vi '&#[0-9]' \
   || true)
 
 if [ -n "$HITS" ]; then
