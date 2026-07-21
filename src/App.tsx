@@ -40,14 +40,19 @@ function parseScript(text: string): Omit<Task, 'id' | 'column' | 'createdAt'> {
 /* -- Column metadata ------------------------------------------------------ */
 
 const COLS: { key: Col; label: string; accent: string }[] = [
-  { key: 'todo', label: 'To Do', accent: '#738091' },
-  { key: 'in-progress', label: 'In Progress', accent: '#4D6BFF' },
-  { key: 'review', label: 'Review', accent: '#F2B960' },
-  { key: 'done', label: 'Done', accent: '#43D6AD' },
+  { key: 'todo', label: 'To Do', accent: 'var(--yap-fg-faint)' },
+  { key: 'in-progress', label: 'In Progress', accent: 'var(--yap-accent)' },
+  { key: 'review', label: 'Review', accent: 'var(--yap-warning)' },
+  { key: 'done', label: 'Done', accent: 'var(--yap-success)' },
 ];
 
-const PRIO: Record<string, string> = { urgent: '#FF6B6B', high: '#fb923c', medium: '#F2B960', low: '#43D6AD' };
-function prioColor(p: string | null): string { return p ? (PRIO[p.toLowerCase()] ?? '#a6b0be') : '#738091'; }
+const PRIO: Record<string, string> = {
+  urgent: 'var(--yap-danger)',
+  high: 'var(--yap-priority-high)',
+  medium: 'var(--yap-warning)',
+  low: 'var(--yap-success)',
+};
+function prioColor(p: string | null): string { return p ? (PRIO[p.toLowerCase()] ?? 'var(--yap-fg-muted)') : 'var(--yap-fg-faint)'; }
 
 /* -- Example data --------------------------------------------------------- */
 
@@ -60,8 +65,6 @@ const EXAMPLES: { text: string; column: Col }[] = [
 ];
 
 /* -- Component ------------------------------------------------------------ */
-
-const ACCENT = '#4D6BFF';
 
 export function App() {
   const [tasks, setTasks] = useState<Task[]>(loadTasks);
@@ -150,7 +153,7 @@ export function App() {
       <div style={S.cardBadges}>
         {task.assignee && <span style={{ ...S.badge, ...S.bAssign }}>+{task.assignee}</span>}
         {task.workspace && <span style={{ ...S.badge, ...S.bWork }}>@{task.workspace}</span>}
-        {task.priority && <span style={S.prioRow}><span style={{ ...S.prioDot, background: prioColor(task.priority) }} /><span style={{ fontSize: 11, color: '#a6b0be' }}>{task.priority}</span></span>}
+        {task.priority && <span style={S.prioRow}><span style={{ ...S.prioDot, background: prioColor(task.priority) }} /><span style={{ fontSize: 11, color: 'var(--yap-fg-muted)' }}>{task.priority}</span></span>}
         {task.dueDate && <span style={{ ...S.badge, ...S.bDue }}>due:{task.dueDate}</span>}
         {task.goal && <span style={{ ...S.badge, ...S.bGoal }}>{task.goal}</span>}
       </div>
@@ -186,7 +189,7 @@ export function App() {
 
       <header style={S.header}>
         <div style={S.headerInner}>
-          <h1 style={S.logo}><span style={{ color: ACCENT }}>Project Management</span><span style={S.logoSub}>by Yapture</span></h1>
+          <h1 style={S.logo}><span style={{ color: 'var(--yap-accent)' }}>Project Management</span><span style={S.logoSub}>by Yapture</span></h1>
           <a href="https://yapture.com/market/project-management" style={S.mktLink}>View on Market &rarr;</a>
         </div>
       </header>
@@ -203,7 +206,7 @@ export function App() {
             <span style={S.prevTitle}>{preview.title}</span>
             {preview.assignee && <span style={{ ...S.badge, ...S.bAssign }}>+{preview.assignee}</span>}
             {preview.workspace && <span style={{ ...S.badge, ...S.bWork }}>@{preview.workspace}</span>}
-            {preview.priority && <span style={S.prioRow}><span style={{ ...S.prioDot, background: prioColor(preview.priority) }} /><span style={{ fontSize: 11, color: '#a6b0be' }}>{preview.priority}</span></span>}
+            {preview.priority && <span style={S.prioRow}><span style={{ ...S.prioDot, background: prioColor(preview.priority) }} /><span style={{ fontSize: 11, color: 'var(--yap-fg-muted)' }}>{preview.priority}</span></span>}
             {preview.dueDate && <span style={{ ...S.badge, ...S.bDue }}>due:{preview.dueDate}</span>}
             {preview.goal && <span style={{ ...S.badge, ...S.bGoal }}>{preview.goal}</span>}
           </div>
@@ -235,7 +238,7 @@ export function App() {
                   {g.tasks.map((t) => (
                     <div key={t.id} style={S.msCard}>
                       <span style={{ ...S.msCardTitle, ...(t.column === 'done' ? { textDecoration: 'line-through', opacity: 0.5 } : {}) }}>{t.title}</span>
-                      <span style={{ ...S.badge, background: colMeta(t.column).accent + '1a', color: colMeta(t.column).accent }}>{colMeta(t.column).label}</span>
+                      <span style={{ ...S.badge, color: colMeta(t.column).accent }}>{colMeta(t.column).label}</span>
                       {t.assignee && <span style={{ ...S.badge, ...S.bAssign }}>+{t.assignee}</span>}
                       <button type="button" onClick={() => removeTask(t.id)} style={S.removeBtn}>&times;</button>
                     </div>
@@ -276,50 +279,50 @@ body { background: #080b10; }
 /* -- Styles --------------------------------------------------------------- */
 
 const S: Record<string, React.CSSProperties> = {
-  root: { minHeight: '100vh', background: '#080b10', color: '#f7f4ec', fontFamily: 'Inter, system-ui, -apple-system, sans-serif', display: 'flex', flexDirection: 'column' },
-  header: { borderBottom: '1px solid rgba(166,176,190,.18)', padding: '16px 0' },
+  root: { minHeight: '100vh', background: '#080b10', color: 'var(--yap-fg)', fontFamily: 'var(--yap-font-sans)', display: 'flex', flexDirection: 'column' },
+  header: { borderBottom: '1px solid var(--yap-border)', padding: '16px 0' },
   headerInner: { maxWidth: 1220, margin: '0 auto', padding: '0 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
   logo: { fontSize: 20, fontWeight: 700, margin: 0, display: 'flex', alignItems: 'baseline', gap: 8 },
-  logoSub: { fontSize: 13, fontWeight: 400, color: '#a6b0be' },
-  mktLink: { fontSize: 14, color: ACCENT, textDecoration: 'none', fontWeight: 500 },
+  logoSub: { fontSize: 13, fontWeight: 400, color: 'var(--yap-fg-muted)' },
+  mktLink: { fontSize: 14, color: 'var(--yap-accent)', textDecoration: 'none', fontWeight: 500 },
   main: { flex: 1, maxWidth: 1220, margin: '0 auto', padding: '32px 24px', width: '100%', boxSizing: 'border-box' as const },
   form: { display: 'flex', gap: 12, marginBottom: 12 },
-  input: { flex: 1, padding: '12px 16px', borderRadius: 10, border: '1px solid rgba(166,176,190,.18)', background: '#0f141c', color: '#f7f4ec', fontSize: 15, fontFamily: '"JetBrains Mono", monospace', outline: 'none' },
-  addBtn: { padding: '12px 24px', borderRadius: 10, border: 'none', background: ACCENT, color: '#fff', fontSize: 15, fontWeight: 600, cursor: 'pointer' },
-  preview: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 16px', marginBottom: 16, borderRadius: 8, background: 'rgba(77,107,255,.06)', border: '1px solid rgba(77,107,255,.15)', fontSize: 14, flexWrap: 'wrap' as const },
-  prevTitle: { color: '#f7f4ec', fontWeight: 500 },
+  input: { flex: 1, padding: '12px 16px', borderRadius: 10, border: '1px solid var(--yap-input-border)', background: 'var(--yap-input-bg)', color: 'var(--yap-fg)', fontSize: 15, fontFamily: 'var(--yap-font-mono)', outline: 'none' },
+  addBtn: { padding: '12px 24px', borderRadius: 10, border: 'none', background: 'var(--yap-accent)', color: '#fff', fontSize: 15, fontWeight: 600, cursor: 'pointer' },
+  preview: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 16px', marginBottom: 16, borderRadius: 8, background: 'var(--yap-accent-muted)', border: '1px solid var(--yap-accent)', fontSize: 14, flexWrap: 'wrap' as const },
+  prevTitle: { color: 'var(--yap-fg)', fontWeight: 500 },
   actions: { display: 'flex', flexWrap: 'wrap' as const, gap: 8, marginBottom: 28, alignItems: 'center' },
-  actBtn: { padding: '8px 16px', borderRadius: 8, border: '1px solid rgba(166,176,190,.14)', background: 'rgba(255,255,255,.04)', color: '#a6b0be', fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' },
-  actBtnOn: { background: 'rgba(77,107,255,.12)', color: '#7B93FF', borderColor: 'rgba(77,107,255,.3)' },
-  countLabel: { marginLeft: 'auto', fontSize: 13, color: '#738091' },
-  col: { minWidth: 0, borderRadius: 12, background: '#0c1018', borderTop: '3px solid', padding: 12, minHeight: 200 },
-  colOver: { border: '2px dashed rgba(77,107,255,.6)', background: 'rgba(77,107,255,.04)', borderTop: '3px solid' },
-  colHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, paddingBottom: 8, borderBottom: '1px solid rgba(166,176,190,.08)' },
-  colLabel: { fontSize: 13, fontWeight: 600, fontFamily: '"JetBrains Mono", monospace', textTransform: 'uppercase' as const, letterSpacing: '.08em', color: '#a6b0be' },
-  colCnt: { fontSize: 12, fontWeight: 600, color: '#738091', background: 'rgba(166,176,190,.1)', borderRadius: 10, padding: '2px 8px', minWidth: 22, textAlign: 'center' as const },
+  actBtn: { padding: '8px 16px', borderRadius: 8, border: '1px solid var(--yap-border-subtle)', background: 'rgba(255,255,255,.04)', color: 'var(--yap-fg-muted)', fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' },
+  actBtnOn: { background: 'var(--yap-accent-muted)', color: 'var(--yap-accent-hover)', borderColor: 'var(--yap-accent)' },
+  countLabel: { marginLeft: 'auto', fontSize: 13, color: 'var(--yap-fg-faint)' },
+  col: { minWidth: 0, borderRadius: 12, background: 'var(--yap-bg)', borderTop: '3px solid', padding: 12, minHeight: 200 },
+  colOver: { border: '2px dashed var(--yap-accent)', background: 'var(--yap-accent-muted)', borderTop: '3px solid' },
+  colHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, paddingBottom: 8, borderBottom: '1px solid var(--yap-border-subtle)' },
+  colLabel: { fontSize: 13, fontWeight: 600, fontFamily: 'var(--yap-font-mono)', textTransform: 'uppercase' as const, letterSpacing: '.08em', color: 'var(--yap-fg-muted)' },
+  colCnt: { fontSize: 12, fontWeight: 600, color: 'var(--yap-fg-faint)', background: 'var(--yap-border-subtle)', borderRadius: 10, padding: '2px 8px', minWidth: 22, textAlign: 'center' as const },
   colBody: { display: 'flex', flexDirection: 'column' as const, gap: 8 },
-  colEmpty: { fontSize: 13, color: '#738091', padding: '24px 0', textAlign: 'center' as const },
-  card: { padding: '10px 12px', borderRadius: 10, border: '1px solid rgba(166,176,190,.18)', background: '#151c27', transition: 'transform .12s, box-shadow .12s, opacity .15s' },
+  colEmpty: { fontSize: 13, color: 'var(--yap-fg-faint)', padding: '24px 0', textAlign: 'center' as const },
+  card: { padding: '10px 12px', borderRadius: 10, border: '1px solid var(--yap-border)', background: 'var(--yap-card-bg)', transition: 'transform .12s, box-shadow .12s, opacity .15s' },
   cardTop: { display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 4 },
   cardTitle: { flex: 1, fontSize: 14, fontWeight: 500, lineHeight: 1.35 },
-  removeBtn: { border: 'none', background: 'none', color: '#738091', fontSize: 16, cursor: 'pointer', padding: '0 2px', flexShrink: 0, lineHeight: 1 },
+  removeBtn: { border: 'none', background: 'none', color: 'var(--yap-fg-faint)', fontSize: 16, cursor: 'pointer', padding: '0 2px', flexShrink: 0, lineHeight: 1 },
   cardBadges: { display: 'flex', flexWrap: 'wrap' as const, gap: 4, alignItems: 'center' },
-  badge: { padding: '2px 7px', borderRadius: 5, fontSize: 11, fontWeight: 600, fontFamily: '"JetBrains Mono", monospace' },
-  bAssign: { background: 'rgba(77,107,255,.12)', color: '#7B93FF' },
-  bWork: { background: 'rgba(5,150,105,.12)', color: '#34d399' },
-  bDue: { background: 'rgba(166,176,190,.1)', color: '#a6b0be' },
-  bGoal: { background: 'rgba(140,99,255,.1)', color: '#B49AFF' },
+  badge: { padding: '2px 7px', borderRadius: 5, fontSize: 11, fontWeight: 600, fontFamily: 'var(--yap-font-mono)' },
+  bAssign: { background: 'var(--yap-info-bg)', color: 'var(--yap-info-fg)' },
+  bWork: { background: 'var(--yap-success-bg)', color: 'var(--yap-success-fg)' },
+  bDue: { background: 'var(--yap-border-subtle)', color: 'var(--yap-fg-muted)' },
+  bGoal: { background: 'var(--yap-accent-muted)', color: 'var(--yap-accent-hover)' },
   prioRow: { display: 'inline-flex', alignItems: 'center', gap: 4 },
   prioDot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
-  msGroup: { marginBottom: 28, padding: 16, borderRadius: 12, background: '#0c1018', border: '1px solid rgba(166,176,190,.1)' },
+  msGroup: { marginBottom: 28, padding: 16, borderRadius: 12, background: 'var(--yap-bg)', border: '1px solid var(--yap-border-subtle)' },
   msHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  msName: { fontSize: 16, fontWeight: 600, color: '#B49AFF', fontFamily: '"JetBrains Mono", monospace' },
-  msCount: { fontSize: 13, color: '#738091' },
-  progTrack: { height: 6, borderRadius: 3, background: 'rgba(166,176,190,.1)', marginBottom: 14, overflow: 'hidden' },
-  progFill: { height: '100%', borderRadius: 3, background: ACCENT, transition: 'width .3s ease' },
+  msName: { fontSize: 16, fontWeight: 600, color: 'var(--yap-accent-hover)', fontFamily: 'var(--yap-font-mono)' },
+  msCount: { fontSize: 13, color: 'var(--yap-fg-faint)' },
+  progTrack: { height: 6, borderRadius: 3, background: 'var(--yap-border-subtle)', marginBottom: 14, overflow: 'hidden' },
+  progFill: { height: '100%', borderRadius: 3, background: 'var(--yap-accent)', transition: 'width .3s ease' },
   msCards: { display: 'flex', flexDirection: 'column' as const, gap: 6 },
-  msCard: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 8, background: '#151c27', border: '1px solid rgba(166,176,190,.12)' },
+  msCard: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 8, background: 'var(--yap-card-bg)', border: '1px solid var(--yap-border-subtle)' },
   msCardTitle: { flex: 1, fontSize: 14, fontWeight: 500 },
-  footer: { borderTop: '1px solid rgba(166,176,190,.18)', padding: '20px 24px', display: 'flex', justifyContent: 'center', gap: 12, fontSize: 13, color: '#738091' },
-  ftLink: { color: ACCENT, textDecoration: 'none' },
+  footer: { borderTop: '1px solid var(--yap-border)', padding: '20px 24px', display: 'flex', justifyContent: 'center', gap: 12, fontSize: 13, color: 'var(--yap-fg-faint)' },
+  ftLink: { color: 'var(--yap-accent)', textDecoration: 'none' },
 };
