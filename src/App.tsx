@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type DragEvent, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
 
 /* -- Types ---------------------------------------------------------------- */
 
@@ -39,11 +39,12 @@ function parseScript(text: string): Omit<Task, 'id' | 'column' | 'createdAt'> {
 
 /* -- Column metadata ------------------------------------------------------ */
 
-const COLS: { key: Col; label: string; accent: string }[] = [
-  { key: 'todo', label: 'To Do', accent: 'var(--yap-fg-faint)' },
-  { key: 'in-progress', label: 'In Progress', accent: 'var(--yap-accent)' },
-  { key: 'review', label: 'Review', accent: 'var(--yap-warning)' },
-  { key: 'done', label: 'Done', accent: 'var(--yap-success)' },
+/* accent = decorative border colour; fg = text colour that meets 4.5:1 on the card background */
+const COLS: { key: Col; label: string; accent: string; fg: string }[] = [
+  { key: 'todo', label: 'To Do', accent: 'var(--yap-fg-faint)', fg: 'var(--yap-fg-muted)' },
+  { key: 'in-progress', label: 'In Progress', accent: 'var(--yap-accent)', fg: 'var(--yap-info-fg)' },
+  { key: 'review', label: 'Review', accent: 'var(--yap-warning)', fg: 'var(--yap-warning)' },
+  { key: 'done', label: 'Done', accent: 'var(--yap-success)', fg: 'var(--yap-success)' },
 ];
 
 const PRIO: Record<string, string> = {
@@ -72,17 +73,55 @@ export function App() {
   const [milestoneView, setMilestoneView] = useState(false);
   const [dragOverCol, setDragOverCol] = useState<Col | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
+  const flip = useRef(false);
+  const pendingFocus = useRef<{ selector: string | null; fallbacks: string[] } | null>(null);
 
   const persist = useCallback((next: Task[]) => { setTasks(next); saveTasks(next); }, []);
+
+  /* Polite live-region message; alternate a trailing nbsp so repeats are re-announced. */
+  const announce = useCallback((msg: string) => {
+    flip.current = !flip.current;
+    setStatus(flip.current ? msg : msg + '\u00a0');
+  }, []);
+
+  /* After a remove/move, restore focus to the next control, else a heading, else the composer. */
+  useEffect(() => {
+    const p = pendingFocus.current;
+    if (!p) return;
+    pendingFocus.current = null;
+    const el = (p.selector && document.querySelector<HTMLElement>(p.selector))
+      || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
+    el?.focus();
+  }, [tasks]);
 
   const addTask = useCallback((text: string, col?: Col) => {
     if (!text.trim()) return;
     const parsed = parseScript(text);
     persist([{ id: crypto.randomUUID(), ...parsed, column: col ?? 'todo', createdAt: new Date().toISOString() }, ...tasks]);
     setInput('');
-  }, [tasks, persist]);
+    announce(`Added ${parsed.title}`);
+  }, [tasks, persist, announce]);
 
-  const removeTask = useCallback((id: string) => { persist(tasks.filter((t) => t.id !== id)); }, [tasks, persist]);
+  /* siblings = the tasks shown in the same column/group, so focus can move to the next card. */
+  const removeTask = useCallback((id: string, siblings: Task[], headingId: string) => {
+    const gone = tasks.find((t) => t.id === id);
+    const i = siblings.findIndex((t) => t.id === id);
+    const next = siblings[i + 1] ?? siblings[i - 1];
+    pendingFocus.current = { selector: next ? `[data-remove-id="${next.id}"]` : null, fallbacks: [headingId, 'task-input'] };
+    persist(tasks.filter((t) => t.id !== id));
+    if (gone) announce(`Removed ${gone.title}`);
+  }, [tasks, persist, announce]);
+
+  /* Keyboard / single-pointer alternative to drag-and-drop. */
+  // restoreFocus only from the select (keyboard/single pointer); a mouse drop must not move focus or scroll.
+  const moveTask = useCallback((id: string, target: Col, restoreFocus = false) => {
+    const t = tasks.find((x) => x.id === id);
+    if (!t || t.column === target) return;
+    if (restoreFocus) pendingFocus.current = { selector: `[data-move-id="${id}"]`, fallbacks: ['task-input'] };
+    persist(tasks.map((x) => (x.id === id ? { ...x, column: target } : x)));
+    announce(`Moved ${t.title} to ${COLS.find((c) => c.key === target)!.label}`);
+  }, [tasks, persist, announce]);
   const handleSubmit = (e: FormEvent) => { e.preventDefault(); addTask(input); };
 
   const loadExamples = () => {
@@ -90,6 +129,7 @@ export function App() {
       id: crypto.randomUUID(), ...parseScript(ex.text), column: ex.column, createdAt: new Date().toISOString(),
     })) as Task[];
     persist([...items, ...tasks]);
+    announce(`Added ${items.length} tasks`);
   };
 
   /* -- Drag-and-drop ------------------------------------------------------ */
@@ -114,7 +154,7 @@ export function App() {
   const onDrop = (e: DragEvent<HTMLDivElement>, target: Col) => {
     e.preventDefault();
     const id = e.dataTransfer.getData('text/plain');
-    if (id) persist(tasks.map((t) => (t.id === id ? { ...t, column: target } : t)));
+    if (id) moveTask(id, target);
     setDragOverCol(null); setDraggingId(null);
   };
 
@@ -141,6 +181,13 @@ export function App() {
 
   /* -- Render helpers ----------------------------------------------------- */
 
+  const moveSelect = (task: Task) => (
+    <select aria-label={`Move ${task.title} to`} value={task.column} data-move-id={task.id}
+      onChange={(e) => moveTask(task.id, e.target.value as Col, true)} style={S.moveSel}>
+      {COLS.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+    </select>
+  );
+
   const renderCard = (task: Task) => (
     <div key={task.id} draggable onDragStart={(e) => onDragStart(e, task.id)} onDragEnd={onDragEnd}
       style={{ ...S.card, opacity: draggingId === task.id ? 0.4 : 1 }}>
@@ -148,7 +195,8 @@ export function App() {
         <span style={{ ...S.cardTitle, ...(task.column === 'done' ? { textDecoration: 'line-through', opacity: 0.5 } : {}) }}>
           {task.title}
         </span>
-        <button type="button" onClick={() => removeTask(task.id)} style={S.removeBtn}>&times;</button>
+        <button type="button" onClick={() => removeTask(task.id, colTasks[task.column], `col-${task.column}`)} style={S.removeBtn}
+          aria-label={`Remove ${task.title}`} data-remove-id={task.id}><span aria-hidden="true">&times;</span></button>
       </div>
       <div style={S.cardBadges}>
         {task.assignee && <span style={{ ...S.badge, ...S.bAssign }}>+{task.assignee}</span>}
@@ -157,6 +205,7 @@ export function App() {
         {task.dueDate && <span style={{ ...S.badge, ...S.bDue }}>due:{task.dueDate}</span>}
         {task.goal && <span style={{ ...S.badge, ...S.bGoal }}>{task.goal}</span>}
       </div>
+      <div style={S.moveRow}>{moveSelect(task)}</div>
     </div>
   );
 
@@ -169,7 +218,7 @@ export function App() {
         onDrop={(e) => onDrop(e, c.key)}
         style={{ ...S.col, borderTopColor: c.accent, ...(over ? S.colOver : {}) }}>
         <div style={S.colHead}>
-          <h2 style={S.colLabel}>{c.label}</h2>
+          <h2 id={`col-${c.key}`} tabIndex={-1} style={S.colLabel}>{c.label}</h2>
           <span style={S.colCnt}>{items.length}</span>
         </div>
         <div style={S.colBody}>
@@ -196,7 +245,8 @@ export function App() {
 
       <main style={S.main}>
         <form onSubmit={handleSubmit} style={S.form}>
-          <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
+          <label htmlFor="task-input" className="sr-only">Add a task</label>
+          <input id="task-input" type="text" value={input} onChange={(e) => setInput(e.target.value)}
             placeholder="Add a task -- try: Design onboarding #+alice #@launch #!high #^q3-release due:friday" style={S.input} />
           <button type="submit" disabled={!input.trim()} style={S.addBtn}>Add</button>
         </form>
@@ -225,10 +275,10 @@ export function App() {
           <div className="pm-milestones">
             {milestoneGroups.length === 0 ? (
               <div style={S.colEmpty}>No tasks yet. Add some or load the Sprint planning example.</div>
-            ) : milestoneGroups.map((g) => (
+            ) : milestoneGroups.map((g, gi) => (
               <div key={g.name} style={S.msGroup}>
                 <div style={S.msHead}>
-                  <span style={S.msName}>{g.name}</span>
+                  <h2 id={`ms-${gi}`} tabIndex={-1} style={S.msName}>{g.name}</h2>
                   <span style={S.msCount}>{g.done}/{g.total} done</span>
                 </div>
                 <div style={S.progTrack}>
@@ -238,9 +288,11 @@ export function App() {
                   {g.tasks.map((t) => (
                     <div key={t.id} style={S.msCard}>
                       <span style={{ ...S.msCardTitle, ...(t.column === 'done' ? { textDecoration: 'line-through', opacity: 0.5 } : {}) }}>{t.title}</span>
-                      <span style={{ ...S.badge, color: colMeta(t.column).accent }}>{colMeta(t.column).label}</span>
+                      <span style={{ ...S.badge, color: colMeta(t.column).fg }}>{colMeta(t.column).label}</span>
                       {t.assignee && <span style={{ ...S.badge, ...S.bAssign }}>+{t.assignee}</span>}
-                      <button type="button" onClick={() => removeTask(t.id)} style={S.removeBtn}>&times;</button>
+                      {moveSelect(t)}
+                      <button type="button" onClick={() => removeTask(t.id, g.tasks, `ms-${gi}`)} style={S.removeBtn}
+                        aria-label={`Remove ${t.title}`} data-remove-id={t.id}><span aria-hidden="true">&times;</span></button>
                     </div>
                   ))}
                 </div>
@@ -251,6 +303,8 @@ export function App() {
           <div className="pm-board">{COLS.map(renderCol)}</div>
         )}
       </main>
+
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{status}</p>
 
       <footer style={S.footer}>
         <span>Built on{' '}<a href="https://yapture.com" style={S.ftLink}>Yapture</a>{' '}Script and list primitives</span>
@@ -268,6 +322,8 @@ export function App() {
 const responsiveCSS = `
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #080b10; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--yap-ring); outline-offset: 2px; }
 .pm-board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
 @media (max-width: 900px) { .pm-board { grid-template-columns: repeat(2, 1fr) !important; } }
 @media (max-width: 600px) { .pm-board { grid-template-columns: 1fr !important; } }
@@ -287,42 +343,44 @@ const S: Record<string, React.CSSProperties> = {
   mktLink: { fontSize: 14, color: 'var(--yap-accent)', textDecoration: 'none', fontWeight: 500 },
   main: { flex: 1, maxWidth: 1220, margin: '0 auto', padding: '32px 24px', width: '100%', boxSizing: 'border-box' as const },
   form: { display: 'flex', gap: 12, marginBottom: 12 },
-  input: { flex: 1, padding: '12px 16px', borderRadius: 10, border: '1px solid var(--yap-input-border)', background: 'var(--yap-input-bg)', color: 'var(--yap-fg)', fontSize: 15, fontFamily: 'var(--yap-font-mono)', outline: 'none' },
-  addBtn: { padding: '12px 24px', borderRadius: 10, border: 'none', background: 'var(--yap-accent)', color: '#fff', fontSize: 15, fontWeight: 600, cursor: 'pointer' },
+  input: { flex: 1, padding: '12px 16px', borderRadius: 10, border: '1px solid var(--yap-fg-faint)', background: 'var(--yap-input-bg)', color: 'var(--yap-fg)', fontSize: 15, fontFamily: 'var(--yap-font-mono)' },
+  addBtn: { padding: '12px 24px', borderRadius: 10, border: 'none', background: 'var(--yap-accent)', color: 'var(--yap-bg)', fontSize: 15, fontWeight: 600, cursor: 'pointer' },
   preview: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 16px', marginBottom: 16, borderRadius: 8, background: 'var(--yap-accent-muted)', border: '1px solid var(--yap-accent)', fontSize: 14, flexWrap: 'wrap' as const },
   prevTitle: { color: 'var(--yap-fg)', fontWeight: 500 },
   actions: { display: 'flex', flexWrap: 'wrap' as const, gap: 8, marginBottom: 28, alignItems: 'center' },
   actBtn: { padding: '8px 16px', borderRadius: 8, border: '1px solid var(--yap-border-subtle)', background: 'rgba(255,255,255,.04)', color: 'var(--yap-fg-muted)', fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' },
-  actBtnOn: { background: 'var(--yap-accent-muted)', color: 'var(--yap-accent-hover)', borderColor: 'var(--yap-accent)' },
-  countLabel: { marginLeft: 'auto', fontSize: 13, color: 'var(--yap-fg-faint)' },
+  actBtnOn: { background: 'var(--yap-accent-muted)', color: 'var(--yap-info-fg)', borderColor: 'var(--yap-accent)' },
+  countLabel: { marginLeft: 'auto', fontSize: 13, color: 'var(--yap-fg-muted)' },
   col: { minWidth: 0, borderRadius: 12, background: 'var(--yap-bg)', borderTop: '3px solid', padding: 12, minHeight: 200 },
   colOver: { border: '2px dashed var(--yap-accent)', background: 'var(--yap-accent-muted)', borderTop: '3px solid' },
   colHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, paddingBottom: 8, borderBottom: '1px solid var(--yap-border-subtle)' },
   colLabel: { fontSize: 13, fontWeight: 600, fontFamily: 'var(--yap-font-mono)', textTransform: 'uppercase' as const, letterSpacing: '.08em', color: 'var(--yap-fg-muted)' },
-  colCnt: { fontSize: 12, fontWeight: 600, color: 'var(--yap-fg-faint)', background: 'var(--yap-border-subtle)', borderRadius: 10, padding: '2px 8px', minWidth: 22, textAlign: 'center' as const },
+  colCnt: { fontSize: 12, fontWeight: 600, color: 'var(--yap-fg-muted)', background: 'var(--yap-border-subtle)', borderRadius: 10, padding: '2px 8px', minWidth: 22, textAlign: 'center' as const },
   colBody: { display: 'flex', flexDirection: 'column' as const, gap: 8 },
-  colEmpty: { fontSize: 13, color: 'var(--yap-fg-faint)', padding: '24px 0', textAlign: 'center' as const },
+  colEmpty: { fontSize: 13, color: 'var(--yap-fg-muted)', padding: '24px 0', textAlign: 'center' as const },
   card: { padding: '10px 12px', borderRadius: 10, border: '1px solid var(--yap-border)', background: 'var(--yap-card-bg)', transition: 'transform .12s, box-shadow .12s, opacity .15s' },
   cardTop: { display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 4 },
   cardTitle: { flex: 1, fontSize: 14, fontWeight: 500, lineHeight: 1.35 },
-  removeBtn: { border: 'none', background: 'none', color: 'var(--yap-fg-faint)', fontSize: 16, cursor: 'pointer', padding: '0 2px', flexShrink: 0, lineHeight: 1 },
+  removeBtn: { border: 'none', background: 'none', color: 'var(--yap-fg-muted)', fontSize: 16, cursor: 'pointer', padding: '0 2px', flexShrink: 0, lineHeight: 1 },
   cardBadges: { display: 'flex', flexWrap: 'wrap' as const, gap: 4, alignItems: 'center' },
   badge: { padding: '2px 7px', borderRadius: 5, fontSize: 11, fontWeight: 600, fontFamily: 'var(--yap-font-mono)' },
   bAssign: { background: 'var(--yap-info-bg)', color: 'var(--yap-info-fg)' },
   bWork: { background: 'var(--yap-success-bg)', color: 'var(--yap-success-fg)' },
   bDue: { background: 'var(--yap-border-subtle)', color: 'var(--yap-fg-muted)' },
-  bGoal: { background: 'var(--yap-accent-muted)', color: 'var(--yap-accent-hover)' },
+  bGoal: { background: 'var(--yap-accent-muted)', color: 'var(--yap-info-fg)' },
+  moveRow: { marginTop: 8 },
+  moveSel: { padding: '4px 8px', borderRadius: 6, border: '1px solid var(--yap-fg-faint)', background: 'var(--yap-input-bg)', color: 'var(--yap-fg)', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer' },
   prioRow: { display: 'inline-flex', alignItems: 'center', gap: 4 },
   prioDot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
   msGroup: { marginBottom: 28, padding: 16, borderRadius: 12, background: 'var(--yap-bg)', border: '1px solid var(--yap-border-subtle)' },
   msHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  msName: { fontSize: 16, fontWeight: 600, color: 'var(--yap-accent-hover)', fontFamily: 'var(--yap-font-mono)' },
-  msCount: { fontSize: 13, color: 'var(--yap-fg-faint)' },
+  msName: { margin: 0, fontSize: 16, fontWeight: 600, color: 'var(--yap-accent-hover)', fontFamily: 'var(--yap-font-mono)' },
+  msCount: { fontSize: 13, color: 'var(--yap-fg-muted)' },
   progTrack: { height: 6, borderRadius: 3, background: 'var(--yap-border-subtle)', marginBottom: 14, overflow: 'hidden' },
   progFill: { height: '100%', borderRadius: 3, background: 'var(--yap-accent)', transition: 'width .3s ease' },
   msCards: { display: 'flex', flexDirection: 'column' as const, gap: 6 },
-  msCard: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 8, background: 'var(--yap-card-bg)', border: '1px solid var(--yap-border-subtle)' },
+  msCard: { display: 'flex', flexWrap: 'wrap' as const, alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 8, background: 'var(--yap-card-bg)', border: '1px solid var(--yap-border-subtle)' },
   msCardTitle: { flex: 1, fontSize: 14, fontWeight: 500 },
-  footer: { borderTop: '1px solid var(--yap-border)', padding: '20px 24px', display: 'flex', justifyContent: 'center', gap: 12, fontSize: 13, color: 'var(--yap-fg-faint)' },
-  ftLink: { color: 'var(--yap-accent)', textDecoration: 'none' },
+  footer: { borderTop: '1px solid var(--yap-border)', padding: '20px 24px', display: 'flex', justifyContent: 'center', gap: 12, fontSize: 13, color: 'var(--yap-fg-muted)' },
+  ftLink: { color: 'var(--yap-accent)', textDecoration: 'underline' },
 };
