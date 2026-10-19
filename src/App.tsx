@@ -14,8 +14,40 @@ interface Task {
 /* -- Persistence ---------------------------------------------------------- */
 
 const STORAGE_KEY = 'yapture.app-pm.tasks.v1';
-function loadTasks(): Task[] { try { const r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : []; } catch { return []; } }
-function saveTasks(t: Task[]) { localStorage.setItem(STORAGE_KEY, JSON.stringify(t)); }
+function isTask(value: unknown): value is Task {
+  if (!value || typeof value !== 'object') return false;
+  const task = value as Record<string, unknown>;
+  const nullableString = (field: string) => task[field] === null || typeof task[field] === 'string';
+  return typeof task.id === 'string'
+    && typeof task.raw === 'string'
+    && typeof task.title === 'string'
+    && typeof task.createdAt === 'string'
+    && (task.column === 'todo' || task.column === 'in-progress' || task.column === 'review' || task.column === 'done')
+    && nullableString('assignee')
+    && nullableString('workspace')
+    && nullableString('priority')
+    && nullableString('goal')
+    && nullableString('dueDate');
+}
+export function loadTasks(): Task[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(isTask) : [];
+  } catch { return []; }
+}
+export function saveTasks(t: Task[]): boolean {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw !== null) {
+      const prior: unknown = JSON.parse(raw);
+      if (!Array.isArray(prior) || !prior.every(isTask)) return false;
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(t));
+    return true;
+  } catch { return false; }
+}
 
 /* -- Parser --------------------------------------------------------------- */
 
@@ -74,10 +106,14 @@ export function App() {
   const [dragOverCol, setDragOverCol] = useState<Col | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [status, setStatus] = useState('');
+  const [storageWarning, setStorageWarning] = useState(false);
   const flip = useRef(false);
   const pendingFocus = useRef<{ selector: string | null; fallbacks: string[] } | null>(null);
 
-  const persist = useCallback((next: Task[]) => { setTasks(next); saveTasks(next); }, []);
+  const persist = useCallback((next: Task[]) => {
+    setTasks(next);
+    if (!saveTasks(next)) setStorageWarning(true);
+  }, []);
 
   /* Polite live-region message; alternate a trailing nbsp so repeats are re-announced. */
   const announce = useCallback((msg: string) => {
@@ -244,6 +280,7 @@ export function App() {
       </header>
 
       <main style={S.main}>
+        {storageWarning && <p role="alert">Changes could not be saved. They may disappear when you reload this page.</p>}
         <form onSubmit={handleSubmit} style={S.form}>
           <label htmlFor="task-input" className="sr-only">Add a task</label>
           <input id="task-input" type="text" value={input} onChange={(e) => setInput(e.target.value)}
