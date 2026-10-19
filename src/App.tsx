@@ -1,34 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
+import { createBackup, isTask, MAX_BACKUP_BYTES, parseBackup, type Col, type Task } from './backup';
 
 /* -- Types ---------------------------------------------------------------- */
-
-type Col = 'todo' | 'in-progress' | 'review' | 'done';
-
-interface Task {
-  id: string; raw: string; title: string;
-  assignee: string | null; workspace: string | null;
-  priority: string | null; goal: string | null;
-  dueDate: string | null; column: Col; createdAt: string;
-}
 
 /* -- Persistence ---------------------------------------------------------- */
 
 const STORAGE_KEY = 'yapture.app-pm.tasks.v1';
-function isTask(value: unknown): value is Task {
-  if (!value || typeof value !== 'object') return false;
-  const task = value as Record<string, unknown>;
-  const nullableString = (field: string) => task[field] === null || typeof task[field] === 'string';
-  return typeof task.id === 'string'
-    && typeof task.raw === 'string'
-    && typeof task.title === 'string'
-    && typeof task.createdAt === 'string'
-    && (task.column === 'todo' || task.column === 'in-progress' || task.column === 'review' || task.column === 'done')
-    && nullableString('assignee')
-    && nullableString('workspace')
-    && nullableString('priority')
-    && nullableString('goal')
-    && nullableString('dueDate');
-}
 export function loadTasks(): Task[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -107,6 +84,8 @@ export function App() {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [storageWarning, setStorageWarning] = useState(false);
+  const [backupFeedback, setBackupFeedback] = useState('');
+  const backupInput = useRef<HTMLInputElement>(null);
   const flip = useRef(false);
   const pendingFocus = useRef<{ selector: string | null; fallbacks: string[] } | null>(null);
 
@@ -126,8 +105,12 @@ export function App() {
     const p = pendingFocus.current;
     if (!p) return;
     pendingFocus.current = null;
-    const el = (p.selector && document.querySelector<HTMLElement>(p.selector))
-      || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
+    let target: HTMLElement | null = null;
+    if (p.selector) {
+      try { target = document.querySelector<HTMLElement>(p.selector); }
+      catch { /* A restored record ID may not be valid CSS selector syntax. */ }
+    }
+    const el = target || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
     el?.focus();
   }, [tasks]);
 
@@ -144,7 +127,7 @@ export function App() {
     const gone = tasks.find((t) => t.id === id);
     const i = siblings.findIndex((t) => t.id === id);
     const next = siblings[i + 1] ?? siblings[i - 1];
-    pendingFocus.current = { selector: next ? `[data-remove-id="${next.id}"]` : null, fallbacks: [headingId, 'task-input'] };
+    pendingFocus.current = { selector: next ? `[data-remove-id="${CSS.escape(next.id)}"]` : null, fallbacks: [headingId, 'task-input'] };
     persist(tasks.filter((t) => t.id !== id));
     if (gone) announce(`Removed ${gone.title}`);
   }, [tasks, persist, announce]);
@@ -154,7 +137,7 @@ export function App() {
   const moveTask = useCallback((id: string, target: Col, restoreFocus = false) => {
     const t = tasks.find((x) => x.id === id);
     if (!t || t.column === target) return;
-    if (restoreFocus) pendingFocus.current = { selector: `[data-move-id="${id}"]`, fallbacks: ['task-input'] };
+    if (restoreFocus) pendingFocus.current = { selector: `[data-move-id="${CSS.escape(id)}"]`, fallbacks: ['task-input'] };
     persist(tasks.map((x) => (x.id === id ? { ...x, column: target } : x)));
     announce(`Moved ${t.title} to ${COLS.find((c) => c.key === target)!.label}`);
   }, [tasks, persist, announce]);
@@ -214,6 +197,51 @@ export function App() {
   }, [tasks, milestoneView]);
 
   const preview = useMemo(() => (input.trim() ? parseScript(input) : null), [input]);
+
+  const downloadBackup = useCallback(() => {
+    try {
+      const blob = new Blob([createBackup(tasks)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `project-management-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      try { link.click(); }
+      finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+      setBackupFeedback('Backup download started. Keep the JSON file somewhere safe.');
+      announce('Backup download started');
+    } catch {
+      setBackupFeedback('Could not create backup.');
+      announce('Could not create backup');
+    }
+  }, [tasks, announce]);
+
+  const restoreBackup = useCallback(async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      if (file.size > MAX_BACKUP_BYTES) throw new Error('Backup exceeds 1 MiB');
+      const backup = parseBackup(await file.text());
+      if (tasks.length !== 0 || loadTasks().length !== 0) {
+        throw new Error('Restore requires an empty board. Download a backup of this board first.');
+      }
+      const tasksBeforeConfirm = localStorage.getItem(STORAGE_KEY);
+      if (!window.confirm(`Restore ${backup.tasks.length} project tasks?`)) return;
+      if (localStorage.getItem(STORAGE_KEY) !== tasksBeforeConfirm || loadTasks().length !== 0) {
+        throw new Error('Board changed in another tab. Reload before restoring.');
+      }
+      if (!saveTasks(backup.tasks)) throw new Error('Could not save restored tasks');
+      setTasks(backup.tasks);
+      setStorageWarning(false);
+      setBackupFeedback(`Restored ${backup.tasks.length} project tasks.`);
+      announce(`Restored ${backup.tasks.length} project tasks`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not restore backup';
+      setBackupFeedback(message);
+      announce(message);
+    } finally {
+      if (backupInput.current) backupInput.current.value = '';
+    }
+  }, [tasks, announce]);
 
   /* -- Render helpers ----------------------------------------------------- */
 
@@ -305,8 +333,13 @@ export function App() {
             style={{ ...S.actBtn, ...(milestoneView ? S.actBtnOn : {}) }}>
             {milestoneView ? 'Kanban view' : 'Milestone view'}
           </button>
+          <button type="button" onClick={downloadBackup} style={S.actBtn}>Download backup</button>
+          <input ref={backupInput} type="file" accept="application/json,.json" className="sr-only"
+            aria-label="Choose Project Management backup" onChange={(e) => { void restoreBackup(e.target.files?.[0]); }} />
+          <button type="button" onClick={() => backupInput.current?.click()} style={S.actBtn}>Restore backup</button>
           <span style={S.countLabel}>{tasks.length} task{tasks.length !== 1 ? 's' : ''}</span>
         </div>
+        {backupFeedback && <p role="alert">{backupFeedback}</p>}
 
         {milestoneView && milestoneGroups ? (
           <div className="pm-milestones">
