@@ -1,34 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
+import { BoardStore } from './board-store';
+import { createBackup, isTask, MAX_BACKUP_BYTES, parseBackup, type Col, type Task } from './backup';
 
 /* -- Types ---------------------------------------------------------------- */
 
-type Col = 'todo' | 'in-progress' | 'review' | 'done';
-
-interface Task {
-  id: string; raw: string; title: string;
-  assignee: string | null; workspace: string | null;
-  priority: string | null; goal: string | null;
-  dueDate: string | null; column: Col; createdAt: string;
-}
+export type { Task } from './backup';
 
 /* -- Persistence ---------------------------------------------------------- */
 
 const STORAGE_KEY = 'yapture.app-pm.tasks.v1';
-function isTask(value: unknown): value is Task {
-  if (!value || typeof value !== 'object') return false;
-  const task = value as Record<string, unknown>;
-  const nullableString = (field: string) => task[field] === null || typeof task[field] === 'string';
-  return typeof task.id === 'string'
-    && typeof task.raw === 'string'
-    && typeof task.title === 'string'
-    && typeof task.createdAt === 'string'
-    && (task.column === 'todo' || task.column === 'in-progress' || task.column === 'review' || task.column === 'done')
-    && nullableString('assignee')
-    && nullableString('workspace')
-    && nullableString('priority')
-    && nullableString('goal')
-    && nullableString('dueDate');
-}
 export function loadTasks(): Task[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -100,19 +80,86 @@ const EXAMPLES: { text: string; column: Col }[] = [
 /* -- Component ------------------------------------------------------------ */
 
 export function App() {
-  const [tasks, setTasks] = useState<Task[]>(loadTasks);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [input, setInput] = useState('');
   const [milestoneView, setMilestoneView] = useState(false);
   const [dragOverCol, setDragOverCol] = useState<Col | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [storageWarning, setStorageWarning] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [conflict, setConflict] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [recoveryFeedback, setRecoveryFeedback] = useState('');
+  const [backupFeedback, setBackupFeedback] = useState('');
+  const backupInput = useRef<HTMLInputElement>(null);
+  const storeRef = useRef<BoardStore | null>(null);
+  const revisionRef = useRef<number | null>(null);
+  const boardRef = useRef<Task[]>([]);
+  const conflictRef = useRef(false);
+  const legacyWriteRef = useRef(false);
+  const savingRef = useRef(false);
   const flip = useRef(false);
   const pendingFocus = useRef<{ selector: string | null; fallbacks: string[] } | null>(null);
 
-  const persist = useCallback((next: Task[]) => {
+  useEffect(() => {
+    let cancelled = false;
+    let opened: BoardStore | null = null;
+    let opening: ReturnType<typeof BoardStore.open>;
+    try { opening = BoardStore.open(indexedDB, () => localStorage); }
+    catch { setLoadError(true); return; }
+    void opening.then(({ store, board, legacyChanged }) => {
+      if (cancelled) { store.close(); return; }
+      opened = store;
+      storeRef.current = store;
+      revisionRef.current = board.revision;
+      boardRef.current = board.tasks;
+      setTasks(board.tasks);
+      if (legacyChanged) { legacyWriteRef.current = true; setStorageWarning(true); }
+      setReady(true);
+    }).catch(() => { if (!cancelled) setLoadError(true); });
+    return () => {
+      cancelled = true;
+      opened?.close();
+      if (storeRef.current === opened) storeRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onLegacyWrite = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEY) { legacyWriteRef.current = true; setStorageWarning(true); }
+    };
+    window.addEventListener('storage', onLegacyWrite);
+    return () => window.removeEventListener('storage', onLegacyWrite);
+  }, []);
+
+  const persist = useCallback(async (next: Task[]): Promise<boolean> => {
+    if (conflictRef.current || savingRef.current || !storeRef.current || revisionRef.current === null) return false;
+    if (legacyWriteRef.current) {
+      conflictRef.current = true;
+      setTasks(next);
+      setConflict(true);
+      setStorageWarning(true);
+      return false;
+    }
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      const result = await storeRef.current.commit(revisionRef.current, next);
+      if (result.state === 'saved') {
+        revisionRef.current = result.revision;
+        boardRef.current = next;
+        setTasks(next);
+        return true;
+      }
+    } catch { /* Keep the attempted collection available for export. */ }
+    finally { savingRef.current = false; setSaving(false); }
     setTasks(next);
-    if (!saveTasks(next)) setStorageWarning(true);
+    conflictRef.current = true;
+    setConflict(true);
+    setStorageWarning(true);
+    return false;
   }, []);
 
   /* Polite live-region message; alternate a trailing nbsp so repeats are re-announced. */
@@ -126,51 +173,101 @@ export function App() {
     const p = pendingFocus.current;
     if (!p) return;
     pendingFocus.current = null;
-    const el = (p.selector && document.querySelector<HTMLElement>(p.selector))
-      || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
+    let selected: HTMLElement | null = null;
+    try { if (p.selector) selected = document.querySelector<HTMLElement>(p.selector); }
+    catch { /* A legacy record ID can contain CSS selector metacharacters. */ }
+    const el = selected || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
     el?.focus();
   }, [tasks]);
 
-  const addTask = useCallback((text: string, col?: Col) => {
+  const addTask = useCallback(async (text: string, col?: Col) => {
     if (!text.trim()) return;
     const parsed = parseScript(text);
-    persist([{ id: crypto.randomUUID(), ...parsed, column: col ?? 'todo', createdAt: new Date().toISOString() }, ...tasks]);
+    if (!(await persist([{ id: crypto.randomUUID(), ...parsed, column: col ?? 'todo', createdAt: new Date().toISOString() }, ...tasks]))) return;
     setInput('');
     announce(`Added ${parsed.title}`);
   }, [tasks, persist, announce]);
 
   /* siblings = the tasks shown in the same column/group, so focus can move to the next card. */
-  const removeTask = useCallback((id: string, siblings: Task[], headingId: string) => {
+  const removeTask = useCallback(async (id: string, siblings: Task[], headingId: string) => {
     const gone = tasks.find((t) => t.id === id);
     const i = siblings.findIndex((t) => t.id === id);
     const next = siblings[i + 1] ?? siblings[i - 1];
-    pendingFocus.current = { selector: next ? `[data-remove-id="${next.id}"]` : null, fallbacks: [headingId, 'task-input'] };
-    persist(tasks.filter((t) => t.id !== id));
+    pendingFocus.current = { selector: next ? `[data-remove-id="${CSS.escape(next.id)}"]` : null, fallbacks: [headingId, 'task-input'] };
+    if (!(await persist(tasks.filter((t) => t.id !== id)))) return;
     if (gone) announce(`Removed ${gone.title}`);
   }, [tasks, persist, announce]);
 
   /* Keyboard / single-pointer alternative to drag-and-drop. */
   // restoreFocus only from the select (keyboard/single pointer); a mouse drop must not move focus or scroll.
-  const moveTask = useCallback((id: string, target: Col, restoreFocus = false) => {
+  const moveTask = useCallback(async (id: string, target: Col, restoreFocus = false) => {
     const t = tasks.find((x) => x.id === id);
     if (!t || t.column === target) return;
-    if (restoreFocus) pendingFocus.current = { selector: `[data-move-id="${id}"]`, fallbacks: ['task-input'] };
-    persist(tasks.map((x) => (x.id === id ? { ...x, column: target } : x)));
+    if (restoreFocus) pendingFocus.current = { selector: `[data-move-id="${CSS.escape(id)}"]`, fallbacks: ['task-input'] };
+    if (!(await persist(tasks.map((x) => (x.id === id ? { ...x, column: target } : x))))) return;
     announce(`Moved ${t.title} to ${COLS.find((c) => c.key === target)!.label}`);
   }, [tasks, persist, announce]);
-  const handleSubmit = (e: FormEvent) => { e.preventDefault(); addTask(input); };
+  const handleSubmit = (e: FormEvent) => { e.preventDefault(); void addTask(input); };
 
-  const loadExamples = () => {
+  const loadExamples = async () => {
     const items = EXAMPLES.map((ex) => ({
       id: crypto.randomUUID(), ...parseScript(ex.text), column: ex.column, createdAt: new Date().toISOString(),
     })) as Task[];
-    persist([...items, ...tasks]);
+    if (!(await persist([...items, ...tasks]))) return;
     announce(`Added ${items.length} tasks`);
   };
+
+  const downloadBackup = useCallback(() => {
+    try {
+      const url = URL.createObjectURL(new Blob([createBackup(tasks)], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `project-management-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.append(link);
+      try { link.click(); }
+      finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+      setBackupFeedback('Backup download started. Keep the JSON file somewhere safe.');
+      announce('Backup download started');
+    } catch {
+      setBackupFeedback('Could not create backup.');
+      announce('Could not create backup');
+    }
+  }, [tasks, announce]);
+
+  const restoreBackup = useCallback(async (file: File | undefined) => {
+    if (!file) return;
+    setBackupFeedback('');
+    try {
+      if (file.size > MAX_BACKUP_BYTES) throw new Error('Backup exceeds 1 MiB');
+      const backup = parseBackup(await file.text());
+      const revision = revisionRef.current;
+      if (revision === null || boardRef.current.length || conflictRef.current || savingRef.current || legacyWriteRef.current) {
+        throw new Error('Restore requires an empty, unchanged board. Download a backup and reload before restoring.');
+      }
+      const legacyBeforeConfirm = localStorage.getItem(STORAGE_KEY);
+      if (!window.confirm(`Restore ${backup.tasks.length} project tasks?`)) return;
+      if (revisionRef.current !== revision || boardRef.current.length || conflictRef.current
+        || savingRef.current || legacyWriteRef.current || localStorage.getItem(STORAGE_KEY) !== legacyBeforeConfirm) {
+        throw new Error('Board changed in another tab. Reload before restoring.');
+      }
+      if (!(await persist(backup.tasks))) {
+        throw new Error('Restore conflicted or storage failed. Download the unsaved JSON before reloading.');
+      }
+      setBackupFeedback(`Restored ${backup.tasks.length} project tasks.`);
+      announce(`Restored ${backup.tasks.length} project tasks`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not restore backup';
+      setBackupFeedback(message);
+      announce(message);
+    } finally {
+      if (backupInput.current) backupInput.current.value = '';
+    }
+  }, [persist, announce]);
 
   /* -- Drag-and-drop ------------------------------------------------------ */
 
   const onDragStart = (e: DragEvent<HTMLDivElement>, id: string) => {
+    if (conflict || saving) { e.preventDefault(); return; }
     e.dataTransfer.setData('text/plain', id);
     e.dataTransfer.effectAllowed = 'move';
     setDraggingId(id);
@@ -178,6 +275,7 @@ export function App() {
   const onDragEnd = () => { setDraggingId(null); setDragOverCol(null); };
 
   const onDragOver = (e: DragEvent<HTMLDivElement>, col: Col) => {
+    if (conflict || saving) return;
     e.preventDefault(); e.dataTransfer.dropEffect = 'move';
     if (dragOverCol !== col) setDragOverCol(col);
   };
@@ -190,6 +288,7 @@ export function App() {
   const onDrop = (e: DragEvent<HTMLDivElement>, target: Col) => {
     e.preventDefault();
     const id = e.dataTransfer.getData('text/plain');
+    if (conflict || saving) return;
     if (id) moveTask(id, target);
     setDragOverCol(null); setDraggingId(null);
   };
@@ -215,23 +314,65 @@ export function App() {
 
   const preview = useMemo(() => (input.trim() ? parseScript(input) : null), [input]);
 
+  const downloadRecovery = useCallback(() => {
+    try {
+      const data = JSON.stringify({
+        app: 'yapture-project-management', schemaVersion: 1,
+        exportedAt: new Date().toISOString(), tasks,
+      }, null, 2);
+      const url = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `project-management-unsaved-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.append(link);
+      try { link.click(); }
+      finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+      setRecoveryFeedback('Unsaved Project Management JSON download started. Keep it before reloading.');
+      announce('Unsaved Project Management download started');
+    } catch {
+      setRecoveryFeedback('Could not download unsaved data. Keep this tab open.');
+      announce('Could not download unsaved data');
+    }
+  }, [tasks, announce]);
+
+  const downloadLegacyRecovery = () => {
+    try {
+      const data = JSON.stringify({
+        app: 'yapture-project-management', schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        legacyTasksRaw: localStorage.getItem(STORAGE_KEY),
+      }, null, 2);
+      const url = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `project-management-legacy-recovery-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.append(link);
+      try { link.click(); }
+      finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+      setRecoveryFeedback('Original browser data download started. Keep it before changing this browser.');
+    } catch {
+      setRecoveryFeedback('Browser storage could not be read. Keep this tab and browser profile intact.');
+    }
+  };
+
   /* -- Render helpers ----------------------------------------------------- */
 
   const moveSelect = (task: Task) => (
     <select aria-label={`Move ${task.title} to`} value={task.column} data-move-id={task.id}
-      onChange={(e) => moveTask(task.id, e.target.value as Col, true)} style={S.moveSel}>
+      disabled={conflict || saving}
+      onChange={(e) => { void moveTask(task.id, e.target.value as Col, true); }} style={S.moveSel}>
       {COLS.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
     </select>
   );
 
   const renderCard = (task: Task) => (
-    <div key={task.id} draggable onDragStart={(e) => onDragStart(e, task.id)} onDragEnd={onDragEnd}
+    <div key={task.id} draggable={!conflict && !saving} onDragStart={(e) => onDragStart(e, task.id)} onDragEnd={onDragEnd}
       style={{ ...S.card, opacity: draggingId === task.id ? 0.4 : 1 }}>
       <div style={S.cardTop}>
         <span style={{ ...S.cardTitle, ...(task.column === 'done' ? { textDecoration: 'line-through', opacity: 0.5 } : {}) }}>
           {task.title}
         </span>
-        <button type="button" onClick={() => removeTask(task.id, colTasks[task.column], `col-${task.column}`)} style={S.removeBtn}
+        <button type="button" disabled={conflict || saving} onClick={() => { void removeTask(task.id, colTasks[task.column], `col-${task.column}`); }} style={S.removeBtn}
           aria-label={`Remove ${task.title}`} data-remove-id={task.id}><span aria-hidden="true">&times;</span></button>
       </div>
       <div style={S.cardBadges}>
@@ -268,6 +409,13 @@ export function App() {
 
   /* -- JSX ---------------------------------------------------------------- */
 
+  if (loadError) return <main role="alert">
+    <p>Project Management storage could not be opened. Your older browser data was left untouched. Close older tabs and reload after saving a recovery copy.</p>
+    <button type="button" onClick={downloadLegacyRecovery}>Download original browser data</button>
+    {recoveryFeedback && <p role="status">{recoveryFeedback}</p>}
+  </main>;
+  if (!ready) return <main role="status">Loading Project Management…</main>;
+
   return (
     <div style={S.root}>
       <style>{responsiveCSS}</style>
@@ -280,12 +428,17 @@ export function App() {
       </header>
 
       <main style={S.main}>
-        {storageWarning && <p role="alert">Changes could not be saved. They may disappear when you reload this page.</p>}
+        {storageWarning && <p role="alert">{conflict
+          ? 'Another tab changed this board or storage failed. This tab holds unsaved data. Download its JSON before reloading.'
+          : 'Older browser storage changed or cannot be read. This tab is read-only. Download the current backup and, if available, the original browser data before resolving the copies.'}</p>}
+        {storageWarning && <button type="button" onClick={downloadLegacyRecovery} style={S.actBtn}>Download original browser data</button>}
+        {conflict && <button type="button" onClick={downloadRecovery} style={S.actBtn}>Download unsaved JSON</button>}
+        {storageWarning && recoveryFeedback && <p role="status">{recoveryFeedback}</p>}
         <form onSubmit={handleSubmit} style={S.form}>
           <label htmlFor="task-input" className="sr-only">Add a task</label>
           <input id="task-input" type="text" value={input} onChange={(e) => setInput(e.target.value)}
             placeholder="Add a task -- try: Design onboarding #+alice #@launch #!high #^q3-release due:friday" style={S.input} />
-          <button type="submit" disabled={!input.trim()} style={S.addBtn}>Add</button>
+          <button type="submit" disabled={conflict || saving || !input.trim()} style={S.addBtn}>Add</button>
         </form>
 
         {preview && (
@@ -300,13 +453,20 @@ export function App() {
         )}
 
         <div style={S.actions}>
-          <button type="button" onClick={loadExamples} style={S.actBtn}>+ Sprint planning</button>
+          <button type="button" disabled={conflict || saving} onClick={() => { void loadExamples(); }} style={S.actBtn}>+ Sprint planning</button>
           <button type="button" onClick={() => setMilestoneView(!milestoneView)}
             style={{ ...S.actBtn, ...(milestoneView ? S.actBtnOn : {}) }}>
             {milestoneView ? 'Kanban view' : 'Milestone view'}
           </button>
           <span style={S.countLabel}>{tasks.length} task{tasks.length !== 1 ? 's' : ''}</span>
         </div>
+        <div style={S.actions}>
+          <button type="button" onClick={downloadBackup} style={S.actBtn}>Download backup</button>
+          <input ref={backupInput} type="file" accept="application/json,.json" className="sr-only"
+            aria-label="Choose Project Management backup" onChange={(e) => { void restoreBackup(e.target.files?.[0]); }} />
+          <button type="button" disabled={conflict || saving} onClick={() => backupInput.current?.click()} style={S.actBtn}>Restore backup</button>
+        </div>
+        {backupFeedback && <p role="alert">{backupFeedback}</p>}
 
         {milestoneView && milestoneGroups ? (
           <div className="pm-milestones">
@@ -328,7 +488,7 @@ export function App() {
                       <span style={{ ...S.badge, color: colMeta(t.column).fg }}>{colMeta(t.column).label}</span>
                       {t.assignee && <span style={{ ...S.badge, ...S.bAssign }}>+{t.assignee}</span>}
                       {moveSelect(t)}
-                      <button type="button" onClick={() => removeTask(t.id, g.tasks, `ms-${gi}`)} style={S.removeBtn}
+                      <button type="button" disabled={conflict || saving} onClick={() => { void removeTask(t.id, g.tasks, `ms-${gi}`); }} style={S.removeBtn}
                         aria-label={`Remove ${t.title}`} data-remove-id={t.id}><span aria-hidden="true">&times;</span></button>
                     </div>
                   ))}
