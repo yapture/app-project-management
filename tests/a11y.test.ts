@@ -37,7 +37,7 @@ describe('a11y (source-level)', () => {
     expect(src).toMatch(/<select aria-label=\{`Move \$\{task\.title\} to`\} value=\{task\.column\}/);
     // used in the kanban card and in the milestone card
     expect((src.match(/moveSelect\(/g) ?? []).length).toBeGreaterThanOrEqual(2);
-    expect(src).toMatch(/if \(id\) moveTask\(id, target\)/);
+    expect(src).toMatch(/if \(id !== null\) void moveTask\(id, target\)/);
   });
 
   test('milestone group name is a heading', () => {
@@ -49,8 +49,8 @@ describe('a11y (source-level)', () => {
     expect(src).not.toMatch(/(?<![a-zA-Z])color: 'var\(--yap-fg-faint\)'/);
   });
   test("a mouse drop does not move focus; the move select does", () => {
-    expect(/if \(restoreFocus\) pendingFocus\.current = \{ selector: `\[data-move-id=/.test(src)).toBe(true);
+    expect(/if \(restoreFocus\) pendingFocus\.current = \{ id, attribute: 'data-move-id'/.test(src)).toBe(true);
     expect(/moveTask\(task\.id, e\.target\.value as Col, true\)/.test(src)).toBe(true);
-    expect(/if \(id\) moveTask\(id, target\);/.test(src)).toBe(true);
+    expect(/if \(id !== null\) void moveTask\(id, target\);/.test(src)).toBe(true);
   });
 });
