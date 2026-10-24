@@ -65,7 +65,27 @@ const PRIO: Record<string, string> = {
   medium: 'var(--yap-warning)',
   low: 'var(--yap-success)',
 };
-function prioColor(p: string | null): string { return p ? (PRIO[p.toLowerCase()] ?? 'var(--yap-fg-muted)') : 'var(--yap-fg-faint)'; }
+export function prioColor(p: string | null): string {
+  if (!p) return 'var(--yap-fg-faint)';
+  const key = p.toLowerCase();
+  return Object.hasOwn(PRIO, key) ? PRIO[key] : 'var(--yap-fg-muted)';
+}
+
+export function groupMilestones(tasks: Task[]) {
+  const gm = new Map<string, Task[]>();
+  const un: Task[] = [];
+  for (const t of tasks) { if (t.goal) { if (!gm.has(t.goal)) gm.set(t.goal, []); gm.get(t.goal)!.push(t); } else un.push(t); }
+  const groups = Array.from(gm.entries()).sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, items]) => ({ key: `goal:${name}`, name, tasks: items, done: items.filter((t) => t.column === 'done').length, total: items.length }));
+  // A goal label can equal the fallback label, so their identities need separate namespaces.
+  if (un.length) groups.push({ key: 'unassigned', name: 'Ungrouped', tasks: un, done: un.filter((t) => t.column === 'done').length, total: un.length });
+  return groups;
+}
+
+export function resolveTaskDropId(payload: string, activeId: string | null): string | null {
+  // Imported IDs are opaque strings; null alone means no local task drag.
+  return activeId !== null && payload === activeId ? activeId : null;
+}
 
 /* -- Example data --------------------------------------------------------- */
 
@@ -85,6 +105,7 @@ export function App() {
   const [milestoneView, setMilestoneView] = useState(false);
   const [dragOverCol, setDragOverCol] = useState<Col | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const activeDragId = useRef<string | null>(null);
   const [status, setStatus] = useState('');
   const [storageWarning, setStorageWarning] = useState(false);
   const [ready, setReady] = useState(false);
@@ -101,7 +122,11 @@ export function App() {
   const legacyWriteRef = useRef(false);
   const savingRef = useRef(false);
   const flip = useRef(false);
-  const pendingFocus = useRef<{ selector: string | null; fallbacks: string[] } | null>(null);
+  const pendingFocus = useRef<{
+    id: string | null;
+    attribute: 'data-move-id' | 'data-remove-id';
+    fallbacks: string[];
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -173,9 +198,11 @@ export function App() {
     const p = pendingFocus.current;
     if (!p) return;
     pendingFocus.current = null;
-    let selected: HTMLElement | null = null;
-    try { if (p.selector) selected = document.querySelector<HTMLElement>(p.selector); }
-    catch { /* A legacy record ID can contain CSS selector metacharacters. */ }
+    // Restored IDs are opaque strings; CSS escaping changes NUL to U+FFFD.
+    const selected = p.id !== null
+      ? Array.from(document.querySelectorAll<HTMLElement>(`[${p.attribute}]`))
+        .find((el) => el.getAttribute(p.attribute) === p.id)
+      : undefined;
     const el = selected || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
     el?.focus();
   }, [tasks]);
@@ -193,7 +220,7 @@ export function App() {
     const gone = tasks.find((t) => t.id === id);
     const i = siblings.findIndex((t) => t.id === id);
     const next = siblings[i + 1] ?? siblings[i - 1];
-    pendingFocus.current = { selector: next ? `[data-remove-id="${CSS.escape(next.id)}"]` : null, fallbacks: [headingId, 'task-input'] };
+    pendingFocus.current = { id: next ? next.id : null, attribute: 'data-remove-id', fallbacks: [headingId, 'task-input'] };
     if (!(await persist(tasks.filter((t) => t.id !== id)))) return;
     if (gone) announce(`Removed ${gone.title}`);
   }, [tasks, persist, announce]);
@@ -203,7 +230,7 @@ export function App() {
   const moveTask = useCallback(async (id: string, target: Col, restoreFocus = false) => {
     const t = tasks.find((x) => x.id === id);
     if (!t || t.column === target) return;
-    if (restoreFocus) pendingFocus.current = { selector: `[data-move-id="${CSS.escape(id)}"]`, fallbacks: ['task-input'] };
+    if (restoreFocus) pendingFocus.current = { id, attribute: 'data-move-id', fallbacks: ['task-input'] };
     if (!(await persist(tasks.map((x) => (x.id === id ? { ...x, column: target } : x))))) return;
     announce(`Moved ${t.title} to ${COLS.find((c) => c.key === target)!.label}`);
   }, [tasks, persist, announce]);
@@ -267,12 +294,14 @@ export function App() {
   /* -- Drag-and-drop ------------------------------------------------------ */
 
   const onDragStart = (e: DragEvent<HTMLDivElement>, id: string) => {
+    activeDragId.current = null;
     if (conflict || saving) { e.preventDefault(); return; }
     e.dataTransfer.setData('text/plain', id);
     e.dataTransfer.effectAllowed = 'move';
+    activeDragId.current = id;
     setDraggingId(id);
   };
-  const onDragEnd = () => { setDraggingId(null); setDragOverCol(null); };
+  const onDragEnd = () => { activeDragId.current = null; setDraggingId(null); setDragOverCol(null); };
 
   const onDragOver = (e: DragEvent<HTMLDivElement>, col: Col) => {
     if (conflict || saving) return;
@@ -287,10 +316,12 @@ export function App() {
   };
   const onDrop = (e: DragEvent<HTMLDivElement>, target: Col) => {
     e.preventDefault();
-    const id = e.dataTransfer.getData('text/plain');
-    if (conflict || saving) return;
-    if (id) moveTask(id, target);
+    const activeId = activeDragId.current;
+    activeDragId.current = null;
     setDragOverCol(null); setDraggingId(null);
+    if (conflict || saving) return;
+    const id = resolveTaskDropId(e.dataTransfer.getData('text/plain'), activeId);
+    if (id !== null) void moveTask(id, target);
   };
 
   /* -- Derived data ------------------------------------------------------- */
@@ -303,13 +334,7 @@ export function App() {
 
   const milestoneGroups = useMemo(() => {
     if (!milestoneView) return null;
-    const gm = new Map<string, Task[]>();
-    const un: Task[] = [];
-    for (const t of tasks) { if (t.goal) { if (!gm.has(t.goal)) gm.set(t.goal, []); gm.get(t.goal)!.push(t); } else un.push(t); }
-    const groups = Array.from(gm.entries()).sort(([a], [b]) => a.localeCompare(b))
-      .map(([name, items]) => ({ name, tasks: items, done: items.filter((t) => t.column === 'done').length, total: items.length }));
-    if (un.length) groups.push({ name: 'Ungrouped', tasks: un, done: un.filter((t) => t.column === 'done').length, total: un.length });
-    return groups;
+    return groupMilestones(tasks);
   }, [tasks, milestoneView]);
 
   const preview = useMemo(() => (input.trim() ? parseScript(input) : null), [input]);
@@ -473,7 +498,7 @@ export function App() {
             {milestoneGroups.length === 0 ? (
               <div style={S.colEmpty}>No tasks yet. Add some or load the Sprint planning example.</div>
             ) : milestoneGroups.map((g, gi) => (
-              <div key={g.name} style={S.msGroup}>
+              <div key={g.key} style={S.msGroup}>
                 <div style={S.msHead}>
                   <h2 id={`ms-${gi}`} tabIndex={-1} style={S.msName}>{g.name}</h2>
                   <span style={S.msCount}>{g.done}/{g.total} done</span>
@@ -506,9 +531,7 @@ export function App() {
       <footer style={S.footer}>
         <span>Built on{' '}<a href="https://yapture.com" style={S.ftLink}>Yapture</a>{' '}Script and list primitives</span>
         <span>&middot;</span>
-        <a href="https://yapture.com/docs/script" style={S.ftLink}>Script docs</a>
-        <span>&middot;</span>
-        <a href="https://yapture.com/.well-known/yapture-api.md" style={S.ftLink}>API reference</a>
+        <a href="https://docs.yapture.com/" style={S.ftLink}>Developer docs</a>
       </footer>
     </div>
   );
