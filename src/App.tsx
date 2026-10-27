@@ -506,9 +506,7 @@ export function App() {
       <footer style={S.footer}>
         <span>Built on{' '}<a href="https://yapture.com" style={S.ftLink}>Yapture</a>{' '}Script and list primitives</span>
         <span>&middot;</span>
-        <a href="https://yapture.com/docs/script" style={S.ftLink}>Script docs</a>
-        <span>&middot;</span>
-        <a href="https://yapture.com/.well-known/yapture-api.md" style={S.ftLink}>API reference</a>
+        <a href="https://docs.yapture.com/" style={S.ftLink}>Developer docs</a>
       </footer>
     </div>
   );
